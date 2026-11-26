@@ -34,7 +34,7 @@
         <button id="exportTxt" class="btn btn--ghost btn--sm">💾 Xuất .txt</button>
       </div>
       <p class="hint">
-        Tick vào prompt để gắn <b>ảnh tham chiếu</b> (1 hoặc 2 ảnh) và sửa nội dung. Bấm vào chữ prompt để sửa lại.
+        Tick vào prompt để gắn <b>ảnh tham chiếu</b> (không giới hạn số lượng) và sửa nội dung. Bấm vào chữ prompt để sửa lại.
       </p>
       <ul id="plist" class="plist"></ul>
     </section>
@@ -116,11 +116,12 @@
         <label class="lbl" for="editText">Nội dung prompt</label>
         <textarea id="editText" class="tall" rows="12"></textarea>
 
-        <label class="lbl lbl--gap" for="editRef1">Ảnh tham chiếu 1</label>
-        <input id="editRef1" type="text" placeholder="Tên ảnh trong thư viện Flow, VD: Portrait of young man" />
-        <label class="lbl lbl--gap" for="editRef2">Ảnh tham chiếu 2 (tuỳ chọn)</label>
-        <input id="editRef2" type="text" placeholder="Để trống nếu chỉ dùng 1 ảnh" />
-        <p class="hint">Để trống cả 2 ô = không dùng ảnh tham chiếu.</p>
+        <div class="refhead">
+          <span class="lbl">Ảnh tham chiếu</span>
+          <button id="addRef" type="button" class="btn btn--ghost btn--sm">➕ Thêm ảnh</button>
+        </div>
+        <div id="editRefs" class="reflist"></div>
+        <p class="hint">Để trống tất cả = không dùng ảnh tham chiếu. Bấm “➕ Thêm ảnh” hoặc Enter để thêm không giới hạn.</p>
 
         <div class="actions">
           <button id="editSave" class="btn btn--primary">Lưu</button>

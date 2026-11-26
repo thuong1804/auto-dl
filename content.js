@@ -435,13 +435,23 @@ function findRefAddButton(input) {
   const plusAria = /thêm nội dung|thêm tệp|thêm ảnh|add (?:media|content|asset|image|file)|^thêm$|^add$|^create$|^tạo$/i;
 
   let cands = btns.filter((b) => {
+    if (b.closest("header, nav")) return false;
     const t = (b.textContent || "").replace(/\s+/g, " ").trim();
     const a = (b.getAttribute("aria-label") || "").trim();
     if (!(plusText.test(t) || plusAria.test(a))) return false;
     const r = b.getBoundingClientRect();
+    if (r.top < 72 && ir && ir.top > 180) return false; // tránh nút "+" trên thanh header
     return r.width <= 90 && r.height <= 90;
   });
   if (ir) {
+    // chỉ lấy các nút nằm gần vùng thanh prompt (tránh nút "+" ở đầu trang)
+    const near = cands.filter((b) => {
+      const r = b.getBoundingClientRect();
+      return Math.abs(r.top + r.height / 2 - (ir.top + ir.height / 2)) < 260;
+    });
+    if (near.length) cands = near;
+    else return null;
+
     const row = cands.filter((b) => {
       const r = b.getBoundingClientRect();
       const dy = Math.abs(r.top + r.height / 2 - (ir.top + ir.height / 2));
@@ -449,60 +459,155 @@ function findRefAddButton(input) {
     });
     if (row.length) cands = row;
     cands.sort((a, b) => {
-      const da = Math.abs(a.getBoundingClientRect().right - ir.left);
-      const db = Math.abs(b.getBoundingClientRect().right - ir.left);
+      const ra = a.getBoundingClientRect();
+      const rb = b.getBoundingClientRect();
+      const da = Math.hypot(ra.right - ir.left, ra.top + ra.height / 2 - (ir.top + ir.height / 2));
+      const db = Math.hypot(rb.right - ir.left, rb.top + rb.height / 2 - (ir.top + ir.height / 2));
       return da - db;
     });
   }
   return cands[0] || null;
 }
 
+// Danh sách input hiển thị (dùng để nhận diện ô tìm kiếm MỚI xuất hiện sau khi bấm "+")
+const ASSET_INPUT_SEL =
+  'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([type="file"]), [role="searchbox"], [role="combobox"]';
+
+function getVisibleAssetInputs() {
+  return [...document.querySelectorAll(ASSET_INPUT_SEL)].filter(isVisible);
+}
+
+// Tìm container của hộp thoại chọn ảnh dựa trên ô search (hoặc overlay đang mở)
+function findAssetContainer() {
+  const searchEl = window.__h2dev_flow_asset_search;
+  if (searchEl && searchEl.isConnected && isVisible(searchEl)) {
+    const dlg = searchEl.closest(
+      '[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper], [aria-modal="true"]'
+    );
+    if (dlg && isVisible(dlg)) return dlg;
+    // Leo lên tìm popover fixed/absolute bao quanh ô search
+    let cur = searchEl.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      const pos = getComputedStyle(cur).position;
+      const r = cur.getBoundingClientRect();
+      if ((pos === "fixed" || pos === "absolute") && r.width > 180 && r.height > 140) {
+        return cur;
+      }
+      cur = cur.parentElement;
+    }
+  }
+  const overlays = [
+    ...document.querySelectorAll(
+      '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [data-radix-popper-content-wrapper], [aria-modal="true"]'
+    ),
+  ].filter(isVisible);
+  return overlays.length ? overlays[overlays.length - 1] : null;
+}
+
 // Tìm các thành phần của hộp thoại chọn thành phần
 function findAssetUi(kind, name) {
-  const vis = (sel) => [...document.querySelectorAll(sel)].filter(isVisible);
+  const visIn = (root, sel) => [...(root || document).querySelectorAll(sel)].filter(isVisible);
   const textOf = (el) => (cleanElementText(el) || el.textContent || "").replace(/\s+/g, " ").trim();
 
   if (kind === "search") {
-    return (
-      vis('input, [role="searchbox"], [role="combobox"]').find((i) =>
-        /tìm kiếm|search/i.test((i.placeholder || "") + " " + (i.getAttribute("aria-label") || ""))
-      ) || null
-    );
+    const pre = window.__h2dev_flow_pre_ref_inputs || new Set();
+    const promptEd = findPromptInput();
+    const allInputs = getVisibleAssetInputs().filter((i) => i !== promptEd);
+    const meta = (i) =>
+      ((i.placeholder || "") + " " + (i.getAttribute("aria-label") || "") + " " + (i.name || "")).trim();
+    const isSearchLike = (i) => /tìm kiếm|search|thành phần|asset|tệp|library|filter|lọc/i.test(meta(i));
+    const isAssetSpecific = (i) => /thành phần|assets?|thư viện|library|tệp|media/i.test(meta(i));
+
+    // 1) Ưu tiên cao nhất: ô input MỚI xuất hiện sau khi bấm nút "+" (không phụ thuộc r.top hay role)
+    const fresh = allInputs.filter((i) => !pre.has(i));
+    const freshPick = fresh.find(isSearchLike) || fresh[fresh.length - 1];
+    if (freshPick) {
+      window.__h2dev_flow_asset_search = freshPick;
+      return freshPick;
+    }
+
+    // 2) Ô có placeholder/aria nhắc rõ "thành phần / asset / thư viện"
+    const specific = allInputs.find(isAssetSpecific);
+    if (specific) {
+      window.__h2dev_flow_asset_search = specific;
+      return specific;
+    }
+
+    // 3) Ô tìm kiếm nằm trong dialog/popover đang mở
+    const overlays = [
+      ...document.querySelectorAll(
+        '[role="dialog"], [role="alertdialog"], [data-radix-popper-content-wrapper], [aria-modal="true"]'
+      ),
+    ].filter(isVisible);
+    for (let k = overlays.length - 1; k >= 0; k--) {
+      const inDlg = visIn(overlays[k], ASSET_INPUT_SEL).find((i) => i !== promptEd && isSearchLike(i));
+      if (inDlg) {
+        window.__h2dev_flow_asset_search = inDlg;
+        return inDlg;
+      }
+    }
+
+    return null;
   }
+
+  const container = findAssetContainer();
+
   if (kind === "add") {
-    return (
-      vis('button, [role="button"]').find((b) =>
+    const findAddIn = (root) =>
+      visIn(root, 'button, [role="button"]').find((b) =>
         /thêm vào câu lệnh|add to prompt|add to command/i.test(textOf(b))
-      ) || null
-    );
+      ) || null;
+    return (container && findAddIn(container)) || findAddIn(document);
   }
   if (kind === "menu") {
-    return (
-      vis('[role="menuitem"], [role="option"], button, [role="button"]').find((b) =>
-        /thành phần|thư viện|assets?\b|library|chọn từ|choose from/i.test(textOf(b)) &&
-        !/tải nội dung|upload/i.test(textOf(b))
-      ) || null
-    );
+    const findMenuIn = (root) =>
+      visIn(root, '[role="menuitem"], [role="option"], button, [role="button"]').find(
+        (b) =>
+          /thành phần|thư viện|assets?\b|library|chọn từ|choose from/i.test(textOf(b)) &&
+          !/tải nội dung|upload/i.test(textOf(b))
+      ) || null;
+    return (container && findMenuIn(container)) || findMenuIn(document);
   }
   if (kind === "row") {
     const want = (name || "").toLowerCase().trim();
     if (!want) return null;
-    const matches = vis("*").filter((el) => {
-      if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return false;
-      if (el.querySelector("input, textarea")) return false;
-      const r = el.getBoundingClientRect();
-      if (r.width < 20 || r.height < 12 || r.width * r.height > 150000) return false;
-      return textOf(el).toLowerCase().includes(want);
-    });
-    const leaf = matches.filter((e) => !matches.some((o) => o !== e && e.contains(o)));
-    const score = (e) => {
-      const t = textOf(e).toLowerCase();
-      if (t === want) return 0;
-      if (t.startsWith(want)) return 1;
-      return 2;
+    const shortWant = want.length > 25 ? want.slice(0, 25) : want;
+    const labelOf = (el) => {
+      const parts = [
+        textOf(el),
+        el.getAttribute("aria-label") || "",
+        el.getAttribute("title") || "",
+        el.tagName === "IMG" ? el.getAttribute("alt") || "" : "",
+      ];
+      return parts.join(" ").replace(/\s+/g, " ").trim().toLowerCase();
     };
-    leaf.sort((a, b) => score(a) - score(b) || a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-    return leaf[0] || null;
+    const searchIn = (root, strict) => {
+      const matches = visIn(root, "*").filter((el) => {
+        if (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable) return false;
+        if (el.querySelector("input, textarea")) return false;
+        if (root === document && el.closest("header, nav")) return false;
+        const r = el.getBoundingClientRect();
+        if (r.width < 20 || r.height < 12 || r.width * r.height > 150000) return false;
+        const lbl = labelOf(el);
+        return strict ? lbl.includes(want) : lbl.includes(shortWant);
+      });
+      const leaf = matches.filter((e) => !matches.some((o) => o !== e && e.contains(o)));
+      const score = (e) => {
+        const t = labelOf(e);
+        if (t === want) return 0;
+        if (t.startsWith(want)) return 1;
+        if (t.includes(want)) return 2;
+        if (t.startsWith(shortWant)) return 3;
+        return 4;
+      };
+      leaf.sort((a, b) => score(a) - score(b) || a.getBoundingClientRect().top - b.getBoundingClientRect().top);
+      return leaf[0] || null;
+    };
+    return (
+      (container && (searchIn(container, true) || searchIn(container, false))) ||
+      searchIn(document, true) ||
+      searchIn(document, false)
+    );
   }
   return null;
 }
@@ -984,6 +1089,9 @@ if (!window.__H2DEV_FLOW_LISTENER__) {
             sendResponse({ ok: false, notFound: true });
             return;
           }
+          // Ghi nhận các ô input đã có sẵn trước khi bấm "+" để nhận diện chính xác ô tìm kiếm mới mở
+          window.__h2dev_flow_pre_ref_inputs = new Set(getVisibleAssetInputs());
+          window.__h2dev_flow_asset_search = null;
           const r = btn.getBoundingClientRect();
           sendResponse({
             ok: true,
@@ -1106,11 +1214,13 @@ if (!window.__H2DEV_FLOW_LISTENER__) {
         mediaType === "video"
           ? waitForNewVideo(getSeenVideos(), getSeenImages())
           : waitForNewImage(getSeenImages());
-      waiter.then((res) => {
-        if (res.stopped) sendResponse({ ok: false, stopped: true });
-        else if (res.timeout) sendResponse({ ok: false, timeout: true });
-        else sendResponse({ ok: true, src: res.src, mediaType });
-      });
+      waiter
+        .then((res) => {
+          if (res.stopped) sendResponse({ ok: false, stopped: true });
+          else if (res.timeout) sendResponse({ ok: false, timeout: true });
+          else sendResponse({ ok: true, src: res.src, mediaType });
+        })
+        .catch((e) => sendResponse({ ok: false, error: String(e) }));
       return true;
     }
 

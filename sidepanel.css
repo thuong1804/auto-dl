@@ -168,6 +168,30 @@ textarea:focus, input:focus {
 .pitem .refline { margin-top: 5px; padding-left: 28px; font-size: 11px; color: var(--accent-2); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 textarea.tall { min-height: 220px; height: 40vh; line-height: 1.5; }
 .lbl--gap { margin-top: 10px; }
+.refhead {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-top: 10px; margin-bottom: 6px;
+}
+.refhead .lbl { margin-bottom: 0; }
+.reflist {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 220px; overflow-y: auto;
+  margin-bottom: 4px;
+}
+.refrow {
+  display: flex; align-items: center; gap: 6px;
+}
+.refrow .num {
+  color: var(--muted); font-size: 11px; min-width: 18px;
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+.refrow input { flex: 1; padding: 7px 9px; font-size: 12px; }
+.refrow .del {
+  background: none; border: none; color: var(--muted);
+  cursor: pointer; font-size: 14px; padding: 4px 6px;
+  border-radius: 6px;
+}
+.refrow .del:hover { color: var(--red); background: rgba(248, 113, 113, 0.1); }
 .pitem .del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; padding: 0 2px; }
 .pitem .del:hover { color: var(--red); }
 .pitem .refbox { margin-top: 7px; }
@@ -203,7 +227,7 @@ textarea.tall { min-height: 220px; height: 40vh; line-height: 1.5; }
 .queue { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
 .qitem {
   position: relative; z-index: 0;
-  display: flex; align-items: center; gap: 9px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 9px;
   padding: 9px 11px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -211,6 +235,13 @@ textarea.tall { min-height: 220px; height: 40vh; line-height: 1.5; }
   font-size: 12px;
   animation: slideIn 0.3s ease both;
   transition: border-color 0.3s, background 0.3s;
+}
+.qitem .qerr {
+  flex: 0 0 100%;
+  font-size: 11px;
+  color: var(--red);
+  padding-left: 31px;
+  word-break: break-word;
 }
 @keyframes slideIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 

@@ -41,8 +41,26 @@ async function ensureAttached(tabId) {
   }
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, "1.3", () => {
-      if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-      else resolve();
+      if (chrome.runtime.lastError) {
+        const msg = chrome.runtime.lastError.message || "";
+        // Nếu service worker vừa restart mà debugger của chính extension vẫn đang gắn
+        if (/already attached/i.test(msg)) {
+          chrome.debugger.detach({ tabId }, () => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(msg));
+            } else {
+              chrome.debugger.attach({ tabId }, "1.3", () => {
+                if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
+                else resolve();
+              });
+            }
+          });
+          return;
+        }
+        reject(new Error(msg));
+      } else {
+        resolve();
+      }
     });
   });
   attachedTab = tabId;

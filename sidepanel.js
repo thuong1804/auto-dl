@@ -22,8 +22,8 @@ const els = {
   editModal: $("editModal"),
   editTitle: $("editTitle"),
   editText: $("editText"),
-  editRef1: $("editRef1"),
-  editRef2: $("editRef2"),
+  editRefs: $("editRefs"),
+  addRef: $("addRef"),
   editSave: $("editSave"),
   editCancel: $("editCancel"),
   folder: $("folder"),
@@ -127,6 +127,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let promptList = []; // [{prompt, mediaType, timeRange, fileTimestamp, useRef, refs}]
 
 function splitRefs(s) {
+  if (Array.isArray(s)) {
+    return s.map((x) => String(x || "").trim()).filter(Boolean);
+  }
   return (s || "")
     .split(/[,;\n]/)
     .map((x) => x.trim())
@@ -171,6 +174,7 @@ function renderPromptList() {
     li.dataset.i = i;
     const kindLabel = p.mediaType === "video" ? "VIDEO" : "IMG";
     const time = p.timeRange ? `<span class="time">${escapeHtml(p.timeRange)}</span>` : "";
+    const refs = splitRefs(p.refs);
     li.innerHTML = `
       <div class="pitem__top">
         <input type="checkbox" class="chk" title="Gắn ảnh tham chiếu" ${p.useRef ? "checked" : ""} />
@@ -181,8 +185,8 @@ function renderPromptList() {
         <button class="del" title="Xoá prompt này">✕</button>
       </div>
       ${
-        p.useRef && splitRefs(p.refs).length
-          ? `<div class="refline">🖼 ${splitRefs(p.refs).map(escapeHtml).join(" · ")}</div>`
+        p.useRef && refs.length
+          ? `<div class="refline" title="${escapeHtml(refs.join(" · "))}">🖼 (${refs.length}) ${refs.map(escapeHtml).join(" · ")}</div>`
           : ""
       }`;
     els.plist.appendChild(li);
@@ -270,12 +274,16 @@ function renderQueue() {
     const timeBadge = it.timeRange
       ? `<span class="time">${escapeHtml(it.timeRange)}</span>`
       : "";
+    const errLine = it.error
+      ? `<div class="qerr" title="${escapeHtml(it.error)}">⚠ ${escapeHtml(it.error)}</div>`
+      : "";
     li.innerHTML = `
       <span class="num">${i + 1}</span>
       <span class="kind kind--${it.mediaType}">${kindLabel}</span>
       ${timeBadge}
       <span class="txt">${escapeHtml(it.prompt)}</span>
-      <span class="tag ${it.status}">${statusLabel(it.status)}</span>`;
+      <span class="tag ${it.status}">${statusLabel(it.status)}</span>
+      ${errLine}`;
     els.queue.appendChild(li);
   });
   const done = items.filter((i) => i.status === "done").length;
@@ -435,11 +443,14 @@ async function attachReferences(tabId, refsText) {
     // 1) mở hộp thoại bằng nút "+"
     const plus = await sendToTab(tabId, { type: "GET_REF_BTN" });
     if (!plus || !plus.ok) return { ok: false, error: "Không thấy nút “+” thêm ảnh" };
-    await clickAt(tabId, plus);
+    const c1 = await clickAt(tabId, plus);
+    if (!c1 || !c1.ok) {
+      return { ok: false, error: "Lỗi debugger khi bấm “+”: " + (c1?.error || "đóng F12 rồi thử lại") };
+    }
     await sleep(800);
 
     // 2) ô tìm kiếm (nếu chưa thấy thì thử chọn mục "thành phần/thư viện" trong menu)
-    let search = await waitUi(tabId, "search", null, 2);
+    let search = await waitUi(tabId, "search", null, 4);
     if (!search) {
       const menu = await waitUi(tabId, "menu", null, 3);
       if (menu) {
@@ -454,7 +465,11 @@ async function attachReferences(tabId, refsText) {
     }
 
     // 3) gõ tên ảnh rồi chọn dòng kết quả
-    await sendToBg({ type: "DEBUG_TYPE", tabId, x: search.x, y: search.y, text: name });
+    const typed = await sendToBg({ type: "DEBUG_TYPE", tabId, x: search.x, y: search.y, text: name });
+    if (!typed || !typed.ok) {
+      await sendToBg({ type: "DEBUG_ESCAPE", tabId });
+      return { ok: false, error: "Không gõ được tên ảnh: " + (typed?.error || "") };
+    }
     await sleep(1100);
     const row = await waitUi(tabId, "row", name, 6);
     if (!row) {
@@ -464,14 +479,15 @@ async function attachReferences(tabId, refsText) {
     await clickAt(tabId, row);
     await sleep(600);
 
-    // 4) bấm "Thêm vào câu lệnh"
-    const add = await waitUi(tabId, "add", null, 5);
-    if (!add) {
+    // 4) bấm "Thêm vào câu lệnh" (nếu hộp thoại tự đóng sau khi click ảnh thì coi như đã gắn)
+    const add = await waitUi(tabId, "add", null, 3);
+    if (add) {
+      await clickAt(tabId, add);
+      await sleep(900);
+    } else if (await waitUi(tabId, "search", null, 1)) {
       await sendToBg({ type: "DEBUG_ESCAPE", tabId });
       return { ok: false, error: "Không thấy nút “Thêm vào câu lệnh”" };
     }
-    await clickAt(tabId, add);
-    await sleep(900);
 
     // hộp thoại còn mở thì đóng
     if (await waitUi(tabId, "search", null, 1)) {
@@ -493,103 +509,110 @@ async function run() {
     return;
   }
 
-  items = list.map((it) => ({ ...it, status: "pending" }));
+  items = list.map((it) => ({ ...it, status: "pending", error: "" }));
   renderQueue();
 
   running = true;
   els.start.disabled = true;
   els.stop.disabled = false;
 
-  // Khởi tạo bộ nhớ media đã thấy cho phiên chạy mới (tránh tải lặp)
-  await sendToTab(tab.id, { type: "RESET_RUN" });
+  try {
+    // Khởi tạo bộ nhớ media đã thấy cho phiên chạy mới (tránh tải lặp)
+    await sendToTab(tab.id, { type: "RESET_RUN" });
 
-  for (let i = 0; i < items.length; i++) {
-    if (!running) break;
+    for (let i = 0; i < items.length; i++) {
+      if (!running) break;
 
-    items[i].status = "generating";
-    renderQueue();
+      items[i].status = "generating";
+      items[i].error = "";
+      renderQueue();
 
-    // 1) tự chuyển chế độ Ảnh/Video (bằng click thật qua debugger) rồi lấy toạ độ ô prompt
-    await ensureFlowMode(tab.id, items[i].mediaType);
-    if (!running) { items[i].status = "pending"; break; }
-
-    // 1b) gắn ảnh tham chiếu (nếu prompt này được tick)
-    if (items[i].useRef && splitRefs(items[i].refs).length) {
-      const ref = await attachReferences(tab.id, items[i].refs);
+      // 1) tự chuyển chế độ Ảnh/Video (bằng click thật qua debugger) rồi lấy toạ độ ô prompt
+      await ensureFlowMode(tab.id, items[i].mediaType);
       if (!running) { items[i].status = "pending"; break; }
-      if (!ref.ok) {
+
+      // 1b) gắn ảnh tham chiếu (nếu prompt này được tick)
+      if (items[i].useRef && splitRefs(items[i].refs).length) {
+        const ref = await attachReferences(tab.id, items[i].refs);
+        if (!running) { items[i].status = "pending"; break; }
+        if (!ref.ok) {
+          items[i].status = "error";
+          items[i].error = "Ảnh tham chiếu: " + (ref.error || "lỗi không xác định");
+          setConn(false, items[i].error);
+          renderQueue();
+          continue;
+        }
+      }
+
+      const box = await sendToTab(tab.id, { type: "GET_BOX" });
+      if (!running) { items[i].status = "pending"; break; }
+      if (!box || !box.ok) {
         items[i].status = "error";
-        setConn(false, "Ảnh tham chiếu: " + ref.error);
+        items[i].error = (box && box.error) || "Không tìm thấy ô prompt";
+        setConn(false, items[i].error);
         renderQueue();
         continue;
       }
-    }
 
-    const box = await sendToTab(tab.id, { type: "GET_BOX" });
-    if (!running) { items[i].status = "pending"; break; }
-    if (!box || !box.ok) {
-      items[i].status = "error";
-      if (box && box.error) setConn(false, box.error);
-      renderQueue();
-      continue;
-    }
-
-    // 2) GÕ CHỮ THẬT + Enter qua background (chrome.debugger)
-    const typed = await sendToBg({
-      type: "DEBUG_SUBMIT",
-      tabId: tab.id,
-      x: box.x,
-      y: box.y,
-      prompt: items[i].prompt,
-    });
-    if (!running) { items[i].status = "pending"; break; }
-    if (!typed || !typed.ok) {
-      items[i].status = "error";
-      setConn(
-        false,
-        typed && typed.error
-          ? "Lỗi debugger: " + typed.error + " (đóng DevTools F12 trên tab Flow rồi thử lại)"
-          : "Không gõ được (hãy đóng DevTools F12 trên tab Flow)"
-      );
-      renderQueue();
-      // không tiếp tục nếu debugger lỗi
-      break;
-    }
-
-    // 3) chờ ảnh/video mới rồi tải
-    const resp = await sendToTab(tab.id, {
-      type: "WAIT_MEDIA",
-      mediaType: items[i].mediaType,
-    });
-    if (!running) { items[i].status = "pending"; break; }
-
-    if (resp && resp.ok && resp.src) {
-      try {
-        await downloadMedia(resp.src, i + 1, items[i], tab.id);
-        items[i].status = "done";
-      } catch (e) {
-        console.warn("Download lỗi:", e);
+      // 2) GÕ CHỮ THẬT + Enter qua background (chrome.debugger)
+      const typed = await sendToBg({
+        type: "DEBUG_SUBMIT",
+        tabId: tab.id,
+        x: box.x,
+        y: box.y,
+        prompt: items[i].prompt,
+      });
+      if (!running) { items[i].status = "pending"; break; }
+      if (!typed || !typed.ok) {
         items[i].status = "error";
+        items[i].error =
+          typed && typed.error
+            ? "Lỗi debugger: " + typed.error + " (đóng DevTools F12 trên tab Flow rồi thử lại)"
+            : "Không gõ được (hãy đóng DevTools F12 trên tab Flow)";
+        setConn(false, items[i].error);
+        renderQueue();
+        // không tiếp tục nếu debugger lỗi
+        break;
       }
-    } else if (resp && resp.timeout) {
-      items[i].status = "timeout";
-    } else {
-      items[i].status = "error";
+
+      // 3) chờ ảnh/video mới rồi tải
+      const resp = await sendToTab(tab.id, {
+        type: "WAIT_MEDIA",
+        mediaType: items[i].mediaType,
+      });
+      if (!running) { items[i].status = "pending"; break; }
+
+      if (resp && resp.ok && resp.src) {
+        try {
+          await downloadMedia(resp.src, i + 1, items[i], tab.id);
+          items[i].status = "done";
+        } catch (e) {
+          console.warn("Download lỗi:", e);
+          items[i].status = "error";
+          items[i].error = "Lỗi tải file: " + (e.message || e);
+        }
+      } else if (resp && resp.timeout) {
+        items[i].status = "timeout";
+        items[i].error = "Hết thời gian chờ kết quả";
+      } else {
+        items[i].status = "error";
+        items[i].error = (resp && resp.error) || "Không nhận được phản hồi từ tab Flow";
+      }
+      renderQueue();
+
+      // nghỉ ngẫu nhiên trước prompt kế (trừ prompt cuối)
+      if (i < items.length - 1 && running) {
+        await sleep(randDelay());
+      }
     }
+  } finally {
+    // xong hàng đợi -> tách debugger để thanh vàng biến mất
+    await sendToBg({ type: "DEBUG_DETACH" });
+    running = false;
+    els.start.disabled = false;
+    els.stop.disabled = true;
     renderQueue();
-
-    // nghỉ ngẫu nhiên trước prompt kế (trừ prompt cuối)
-    if (i < items.length - 1 && running) {
-      await sleep(randDelay());
-    }
   }
-
-  // xong hàng đợi -> tách debugger để thanh vàng biến mất
-  await sendToBg({ type: "DEBUG_DETACH" });
-
-  running = false;
-  els.start.disabled = false;
-  els.stop.disabled = true;
 }
 
 async function stop() {
@@ -700,8 +723,57 @@ els.plist.addEventListener("click", (e) => {
   }
 });
 
-// Form sửa prompt + ảnh tham chiếu (1 hoặc 2 ảnh)
+// Form sửa prompt + ảnh tham chiếu (không giới hạn số lượng)
 let editIndex = -1;
+
+function renumberRefRows() {
+  [...els.editRefs.querySelectorAll(".refrow")].forEach((row, idx) => {
+    const num = row.querySelector(".num");
+    if (num) num.textContent = idx + 1;
+    const inp = row.querySelector("input");
+    if (inp) {
+      inp.placeholder =
+        idx === 0
+          ? "Tên ảnh trong thư viện Flow, VD: Portrait of young man"
+          : `Tên ảnh tham chiếu ${idx + 1}`;
+    }
+  });
+}
+
+function addRefRow(value = "", focus = false) {
+  const row = document.createElement("div");
+  row.className = "refrow";
+  row.innerHTML = `
+    <span class="num"></span>
+    <input type="text" />
+    <button type="button" class="del" title="Xoá ảnh này">✕</button>
+  `;
+  const input = row.querySelector("input");
+  input.value = value;
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addRefRow("", true);
+    }
+  });
+  row.querySelector(".del").addEventListener("click", () => {
+    if (els.editRefs.querySelectorAll(".refrow").length > 1) {
+      row.remove();
+      renumberRefRows();
+    } else {
+      input.value = "";
+      input.focus();
+    }
+  });
+  els.editRefs.appendChild(row);
+  renumberRefRows();
+  if (focus) {
+    input.focus();
+    row.scrollIntoView({ block: "nearest" });
+  }
+  return input;
+}
+
 function openEdit(i) {
   if (running) return;
   editIndex = i;
@@ -709,25 +781,34 @@ function openEdit(i) {
   const refs = splitRefs(p.refs);
   els.editTitle.textContent = `Prompt #${i + 1}${p.timeRange ? " · " + p.timeRange : ""}`;
   els.editText.value = p.prompt;
-  els.editRef1.value = refs[0] || "";
-  els.editRef2.value = refs[1] || "";
+  els.editRefs.innerHTML = "";
+  let firstInput = null;
+  if (refs.length) {
+    refs.forEach((r, idx) => {
+      const inp = addRefRow(r, false);
+      if (idx === 0) firstInput = inp;
+    });
+  } else {
+    firstInput = addRefRow("", false);
+  }
   els.editModal.hidden = false;
-  (refs.length ? els.editText : els.editRef1).focus();
+  (refs.length ? els.editText : firstInput).focus();
 }
 function closeEdit() {
   els.editModal.hidden = true;
   editIndex = -1;
 }
+els.addRef.addEventListener("click", () => addRefRow("", true));
 els.editCancel.addEventListener("click", closeEdit);
 els.editSave.addEventListener("click", () => {
   if (editIndex < 0) return;
   const p = promptList[editIndex];
   const text = els.editText.value.replace(/\s+/g, " ").trim();
   if (text) p.prompt = text;
-  const refs = [els.editRef1.value, els.editRef2.value]
-    .map((s) => s.replace(/[,;]/g, " ").trim())
+  const refs = [...els.editRefs.querySelectorAll("input")]
+    .map((inp) => inp.value.trim())
     .filter(Boolean);
-  p.refs = refs.join(", ");
+  p.refs = refs;
   p.useRef = refs.length > 0;
   saveSettings();
   renderPromptList();
