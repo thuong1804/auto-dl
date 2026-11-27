@@ -808,10 +808,53 @@ async function submitPromptReliably(input, disabledBefore) {
   return false;
 }
 
+// Tìm thẻ (card) chứa 1 <video>: leo lên tới tổ tiên lớn nhất còn chỉ chứa ≤ 2 ảnh và không chứa video khác
+function videoCardRoot(video) {
+  let best = video.parentElement || video;
+  let el = video.parentElement;
+  for (let depth = 0; depth < 10 && el && el !== document.body; depth++) {
+    if (el.querySelectorAll("video").length > 1) break;
+    if (el.querySelectorAll("img").length > 2) break;
+    best = el;
+    el = el.parentElement;
+  }
+  return best;
+}
+
+function getVideoRoots() {
+  if (!window.__h2dev_flow_video_roots) window.__h2dev_flow_video_roots = new Set();
+  return window.__h2dev_flow_video_roots;
+}
+
+// Ghi nhớ thẻ của video đã thấy: poster của nó sau này có đổi src cũng không bị nhận nhầm là ảnh mới
+function registerVideoCard(video) {
+  try {
+    getVideoRoots().add(videoCardRoot(video));
+  } catch (_) {}
+}
+
 // Kiểm tra xem <img> có nằm trong thẻ của một VIDEO (poster/thumbnail) không
 function isInsideVideoCard(img) {
+  // 1) thẻ của mọi <video> đang có + các thẻ video đã ghi nhớ
+  try {
+    const roots = getVideoRoots();
+    for (const r of [...roots]) if (!r.isConnected) roots.delete(r);
+    for (const v of document.querySelectorAll("video")) roots.add(videoCardRoot(v));
+    for (const r of roots) if (r.contains(img)) return true;
+  } catch (_) {}
+  // 2) Ảnh poster/khung hình luôn nằm đè lên (hoặc cạnh) thẻ <video>: nếu tâm ảnh rơi vào vùng một <video> thì bỏ
+  try {
+    const ir = img.getBoundingClientRect();
+    const cx = ir.left + ir.width / 2;
+    const cy = ir.top + ir.height / 2;
+    for (const v of document.querySelectorAll("video")) {
+      const vr = v.getBoundingClientRect();
+      if (vr.width < 2 || vr.height < 2) continue;
+      if (cx >= vr.left && cx <= vr.right && cy >= vr.top && cy <= vr.bottom) return true;
+    }
+  } catch (_) {}
   let el = img.parentElement;
-  for (let depth = 0; depth < 5 && el && el !== document.body; depth++) {
+  for (let depth = 0; depth < 8 && el && el !== document.body; depth++) {
     // Dừng nếu đã leo lên tới container chứa nhiều thẻ (lưới)
     if (el.querySelectorAll("img").length > 3) break;
     if (el.querySelector("video")) return true;
@@ -883,13 +926,35 @@ function triggerHover(el) {
 }
 
 // ---------- 5. Canh tới khi có ảnh / video MỚI xuất hiện ----------
+// Trang đang hiện thông báo lỗi của Flow (thẻ thất bại, chờ người dùng bấm tải lại)?
+function pageShowsFailure() {
+  try {
+    const t = (document.body.innerText || "").slice(0, 20000);
+    return /không thành công|thất bại|đã xảy ra lỗi|something went wrong|generation failed|\bfailed\b|vi phạm|violat/i.test(t);
+  } catch (_) {
+    return false;
+  }
+}
+const MAX_FAILURE_PAUSE_MS = 30 * 60 * 1000;
+
 async function waitForNewImage(seenImages) {
   const start = Date.now();
+  let pausedMs = 0;
+  let lastTick = start;
   console.log("[h2dev_flow] Đang chờ ảnh mới... (đã ghi nhận:", seenImages.size, ")");
   let lastLog = 0;
-  while (Date.now() - start < CONFIG.maxWaitMs) {
+  while (Date.now() - start - pausedMs < CONFIG.maxWaitMs) {
     if (STOP) return { stopped: true };
-    const elapsedMs = Date.now() - start;
+    // Khi Flow báo lỗi: không tính vào thời gian chờ để người dùng kịp bấm tải lại trên Flow
+    const nowTick = Date.now();
+    if (pausedMs < MAX_FAILURE_PAUSE_MS && pageShowsFailure()) {
+      pausedMs += nowTick - lastTick;
+      lastTick = nowTick;
+      console.log("[h2dev_flow] ⚠ Flow đang báo lỗi — tạm dừng đếm giờ, chờ bạn bấm tải lại...");
+    } else {
+      lastTick = nowTick;
+    }
+    const elapsedMs = Date.now() - start - pausedMs;
     if (elapsedMs >= CONFIG.minGenerateImageMs) {
       const all = getCompletedImages();
       const fresh = all.filter((i) => !isSeen(seenImages, srcKey(i)));
@@ -920,11 +985,21 @@ async function waitForNewVideo(seenVideos, seenImages) {
   const start = Date.now();
   const imgSeen = seenImages || getSeenImages();
   const hovered = new WeakSet();
+  let pausedMs = 0;
+  let lastTick = start;
   console.log("[h2dev_flow] Đang chờ video mới... (đã ghi nhận:", seenVideos.size, ")");
   let lastLog = 0;
-  while (Date.now() - start < CONFIG.maxWaitVideoMs) {
+  while (Date.now() - start - pausedMs < CONFIG.maxWaitVideoMs) {
     if (STOP) return { stopped: true };
-    const elapsedMs = Date.now() - start;
+    const nowTick = Date.now();
+    if (pausedMs < MAX_FAILURE_PAUSE_MS && pageShowsFailure()) {
+      pausedMs += nowTick - lastTick;
+      lastTick = nowTick;
+      console.log("[h2dev_flow] ⚠ Flow đang báo lỗi — tạm dừng đếm giờ, chờ bạn bấm tải lại...");
+    } else {
+      lastTick = nowTick;
+    }
+    const elapsedMs = Date.now() - start - pausedMs;
     if (elapsedMs >= CONFIG.minGenerateVideoMs) {
       const all = getCompletedVideos();
       const fresh = all.filter((v) => !isSeen(seenVideos, videoSrcKey(v)));
@@ -941,6 +1016,12 @@ async function waitForNewVideo(seenVideos, seenImages) {
           if (card) {
             card.querySelectorAll("img").forEach((img) => markSeen(imgSeen, srcKey(img)));
           }
+          // Ghi nhận lại toàn bộ ảnh hiện có (poster/khung hình video có thể đổi src muộn) để KHÔNG tải nhầm thành ảnh
+          snapshotCurrentMedia();
+          registerVideoCard(newest);
+          await sleep(1500);
+          snapshotCurrentMedia();
+          registerVideoCard(newest);
           console.log("[h2dev_flow] ✓✓ Thấy video mới! Đang tải:", finalSrc.slice(0, 70));
           return { video: newest, src: finalSrc };
         }
@@ -1074,6 +1155,7 @@ if (!window.__H2DEV_FLOW_LISTENER__) {
       STOP = false;
       window.__h2dev_flow_seen_images = new Set();
       window.__h2dev_flow_seen_videos = new Set();
+      window.__h2dev_flow_video_roots = new Set();
       snapshotCurrentMedia();
       sendResponse({ ok: true });
       return;

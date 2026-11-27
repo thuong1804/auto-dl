@@ -32,6 +32,8 @@
         <button id="clearAll" class="btn btn--ghost btn--sm">🗑 Xoá hết</button>
         <button id="copyAll" class="btn btn--ghost btn--sm">📋 Sao chép hết</button>
         <button id="exportTxt" class="btn btn--ghost btn--sm">💾 Xuất .txt</button>
+        <button id="uploadPrompt" class="btn btn--ghost btn--sm" title="Upload file .txt đã xuất (có cả ảnh tham chiếu)">📤 Upload prompt</button>
+        <input id="uploadFile" type="file" accept=".txt" hidden />
       </div>
       <p class="hint">
         Tick vào prompt để gắn <b>ảnh tham chiếu</b> (không giới hạn số lượng) và sửa nội dung. Bấm vào chữ prompt để sửa lại.
@@ -69,6 +71,7 @@
 
     <div class="actions">
       <button id="start" class="btn btn--primary"><span>Bắt đầu</span></button>
+      <button id="restart" class="btn btn--ghost" title="Chạy lại toàn bộ từ prompt đầu tiên">Bắt đầu lại từ đầu</button>
       <button id="stop" class="btn btn--danger" disabled>Dừng</button>
     </div>
 

@@ -12,6 +12,8 @@ const els = {
   clearAll: $("clearAll"),
   copyAll: $("copyAll"),
   exportTxt: $("exportTxt"),
+  uploadPrompt: $("uploadPrompt"),
+  uploadFile: $("uploadFile"),
   modal: $("modal"),
   modalText: $("modalText"),
   modalCount: $("modalCount"),
@@ -31,6 +33,7 @@ const els = {
   delayMin: $("delayMin"),
   delayMax: $("delayMax"),
   start: $("start"),
+  restart: $("restart"),
   stop: $("stop"),
   queue: $("queue"),
   progress: $("progress"),
@@ -52,6 +55,21 @@ const IMAGE_PREFIX_RE = /^\[\s*IMAGE\s*\]\s*/i;
 
 function sanitizeTimeToken(t) {
   return t.replace(/:/g, "-").replace(/,/g, ".");
+}
+
+// Dòng ảnh tham chiếu: [ref 1: tên ảnh trong thư viện Flow]
+const REF_LINE_RE = /^\s*\[\s*ref\s*\d*\s*:\s*(.+?)\s*\]\s*$/i;
+
+// Tách các dòng [ref N: ...] ra khỏi nội dung 1 khối prompt
+function extractRefs(body) {
+  const refs = [];
+  const kept = [];
+  for (const line of String(body).split(/\r?\n/)) {
+    const m = line.match(REF_LINE_RE);
+    if (m) refs.push(m[1].trim());
+    else kept.push(line);
+  }
+  return { body: kept.join("\n"), refs };
 }
 
 function extractMediaAndPrompt(body, rawFallback) {
@@ -86,7 +104,7 @@ function parsePrompts(text) {
       const startIdx = m.index;
       const endIdx = i + 1 < matches.length ? matches[i + 1].index : text.length;
       const rawBlock = text.slice(startIdx, endIdx).trim();
-      const body = text.slice(startIdx + m[0].length, endIdx);
+      const { body, refs } = extractRefs(text.slice(startIdx + m[0].length, endIdx));
       const startTime = m[1];
       const endTime = m[2];
       const timeRange = `${startTime} - ${endTime}`;
@@ -99,26 +117,34 @@ function parsePrompts(text) {
         mediaType,
         timeRange,
         fileTimestamp,
+        refs,
+        useRef: refs.length > 0,
       });
     }
     return result;
   }
 
-  // Fallback: không có mốc thời gian -> mỗi dòng là 1 prompt
-  return text
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const { mediaType, prompt } = extractMediaAndPrompt(line, line);
-      return {
-        raw: line,
-        prompt,
-        mediaType,
-        timeRange: "",
-        fileTimestamp: "",
-      };
+  // Fallback: không có mốc thời gian -> mỗi dòng là 1 prompt (dòng [ref N: ...] gắn vào prompt trước)
+  const out = [];
+  for (const line of text.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    const rm = line.match(REF_LINE_RE);
+    if (rm && out.length) {
+      out[out.length - 1].refs.push(rm[1].trim());
+      out[out.length - 1].useRef = true;
+      continue;
+    }
+    const { mediaType, prompt } = extractMediaAndPrompt(line, line);
+    out.push({
+      raw: line,
+      prompt,
+      mediaType,
+      timeRange: "",
+      fileTimestamp: "",
+      refs: [],
+      useRef: false,
     });
+  }
+  return out;
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -152,7 +178,7 @@ async function loadSettings() {
     promptList = s.promptList;
   } else if (typeof s.prompts === "string" && s.prompts.trim()) {
     // chuyển dữ liệu bản cũ sang danh sách mới
-    promptList = parsePrompts(s.prompts).map((p) => ({ ...p, useRef: false, refs: "" }));
+    promptList = parsePrompts(s.prompts);
   }
   if (s.folder) els.folder.value = s.folder;
   if (s.serial != null) els.serial.checked = s.serial;
@@ -499,7 +525,7 @@ async function attachReferences(tabId, refsText) {
 }
 
 // ---------- Vòng lặp chính ----------
-async function run() {
+async function run(fresh = false) {
   const tab = await checkConnection();
   if (!tab) return;
 
@@ -509,19 +535,37 @@ async function run() {
     return;
   }
 
-  items = list.map((it) => ({ ...it, status: "pending", error: "" }));
+  // Tiếp tục từ chỗ dừng nếu hàng đợi cũ còn khớp danh sách prompt và còn mục chưa chạy
+  const isOpen = (s) => s === "pending" || s === "generating";
+  const canResume =
+    !fresh &&
+    items.length === list.length &&
+    items.length > 0 &&
+    items.some((it) => isOpen(it.status)) &&
+    items.some((it) => !isOpen(it.status)) &&
+    items.every((it, k) => it.prompt === list[k].prompt && it.mediaType === list[k].mediaType);
+
+  if (canResume) {
+    items.forEach((it) => {
+      if (it.status === "generating") it.status = "pending";
+    });
+  } else {
+    items = list.map((it) => ({ ...it, status: "pending", error: "" }));
+  }
   renderQueue();
 
   running = true;
   els.start.disabled = true;
+  els.restart.disabled = true;
   els.stop.disabled = false;
 
   try {
-    // Khởi tạo bộ nhớ media đã thấy cho phiên chạy mới (tránh tải lặp)
-    await sendToTab(tab.id, { type: "RESET_RUN" });
+    // Phiên mới thì khởi tạo bộ nhớ media đã thấy (tránh tải lặp); tiếp tục thì giữ nguyên
+    if (!canResume) await sendToTab(tab.id, { type: "RESET_RUN" });
 
     for (let i = 0; i < items.length; i++) {
       if (!running) break;
+      if (!isOpen(items[i].status)) continue; // bỏ qua mục đã xong/lỗi khi tiếp tục
 
       items[i].status = "generating";
       items[i].error = "";
@@ -610,6 +654,7 @@ async function run() {
     await sendToBg({ type: "DEBUG_DETACH" });
     running = false;
     els.start.disabled = false;
+    els.restart.disabled = false;
     els.stop.disabled = true;
     renderQueue();
   }
@@ -638,11 +683,7 @@ els.addPrompt.addEventListener("click", openModal);
 els.modalCancel.addEventListener("click", closeModal);
 els.modalText.addEventListener("input", refreshCount);
 els.modalAdd.addEventListener("click", () => {
-  const added = parsePrompts(els.modalText.value).map((p) => ({
-    ...p,
-    useRef: false,
-    refs: "",
-  }));
+  const added = parsePrompts(els.modalText.value);
   if (added.length) {
     promptList = promptList.concat(added);
     saveSettings();
@@ -656,7 +697,10 @@ function promptListToText() {
     .map((p) => {
       const tag = p.mediaType === "video" ? "[VIDEO - Image-to-Video]" : "[IMAGE]";
       const head = p.timeRange ? `[${p.timeRange}] ${tag}` : tag;
-      return `${head}\n${p.prompt}`;
+      const refLines = p.useRef
+        ? splitRefs(p.refs).map((r, k) => `\n[ref ${k + 1}: ${r}]`).join("")
+        : "";
+      return `${head}\n${p.prompt}${refLines}`;
     })
     .join("\n\n");
 }
@@ -817,6 +861,28 @@ els.editSave.addEventListener("click", () => {
 [els.folder, els.serial, els.delayMin, els.delayMax].forEach((el) =>
   el.addEventListener("change", saveSettings)
 );
+// Upload file .txt đúng định dạng -> tự tách prompt + ảnh tham chiếu và thêm thẳng vào danh sách
+els.uploadPrompt.addEventListener("click", () => {
+  if (running) return;
+  els.uploadFile.click();
+});
+els.uploadFile.addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  e.target.value = "";
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    const added = parsePrompts(String(reader.result || ""));
+    if (!added.length) {
+      alert("Không đọc được prompt nào trong file. Kiểm tra lại định dạng [00:00.0 - 00:02.0] [VIDEO - Image-to-Video].");
+      return;
+    }
+    promptList = promptList.concat(added);
+    saveSettings();
+    renderPromptList();
+  };
+  reader.readAsText(f);
+});
 els.loadTxt.addEventListener("click", () => els.txtFile.click());
 els.txtFile.addEventListener("change", (e) => {
   const f = e.target.files[0];
@@ -828,7 +894,12 @@ els.txtFile.addEventListener("change", (e) => {
   };
   reader.readAsText(f);
 });
-els.start.addEventListener("click", run);
+els.start.addEventListener("click", () => run(false));
+els.restart.addEventListener("click", () => {
+  if (running) return;
+  if (items.some((it) => it.status === "done") && !confirm("Chạy lại từ prompt đầu tiên? Các file đã tải sẽ được tải lại.")) return;
+  run(true);
+});
 els.stop.addEventListener("click", stop);
 
 // ---------- Khởi động ----------
